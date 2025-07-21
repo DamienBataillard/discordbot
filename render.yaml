@@ -1,0 +1,13 @@
+services:
+  - type: worker
+    name: discord-comics-bot
+    runtime: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python bot.py"
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: COMICVINE_API_KEY
+        sync: false
+      - key: DISCORD_CHANNEL_ID
+        sync: false
