@@ -78,6 +78,18 @@ async def follow(ctx, *, series_name):
         await ctx.send(f"ℹ️ You're already following **{series_name}**.")
 
 @bot.command()
+async def unfollow(ctx, *, series_name):
+    """Remove a series from the followed list"""
+    lowered = series_name.lower()
+    matches = [s for s in followed_series if s.lower() == lowered]
+    if matches:
+        followed_series.remove(matches[0])
+        save_followed_series()
+        await ctx.send(f"🗑️ Unfollowed **{series_name}**.")
+    else:
+        await ctx.send(f"❌ Series **{series_name}** is not in your followed list.")
+
+@bot.command()
 async def comics(ctx):
     """Show next issues for followed series"""
     headers = {"User-Agent": "MyComicBot/1.0"}
