@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import os 
 import requests
 from datetime import datetime
+from webserver import keep_alive
 
 # Load environment variables from .env file
 load_dotenv()
@@ -12,6 +13,8 @@ token = os.getenv('DISCORD_TOKEN')
 comicvine_api_key = os.getenv('COMICVINE_API_KEY')
 comics_channel_id = int(os.getenv('DISCORD_CHANNEL_ID'))
 user_selected_series = {}  # user_id -> volume dict
+
+keep_alive()
 
 
 # Set up logging to a file
