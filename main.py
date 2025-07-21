@@ -6,186 +6,146 @@ import os
 import requests
 from datetime import datetime
 from webserver import keep_alive
+import json
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv()
 token = os.getenv('DISCORD_TOKEN')
 comicvine_api_key = os.getenv('COMICVINE_API_KEY')
 comics_channel_id = int(os.getenv('DISCORD_CHANNEL_ID'))
-user_selected_series = {}  # user_id -> volume dict
 
+# Keep-alive (for Render hosting)
 keep_alive()
 
-
-# Set up logging to a file
+# Logging
 handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w')
 
-# Set up Discord bot intents (permissions)
+# Intents
 intents = discord.Intents.default()
-intents.message_content = True  # Allow reading message content
-intents.members = True          # Allow member join events
+intents.message_content = True
+intents.members = True
 
-# Create bot instance with command prefix '!' and specified intents
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Track if comics have been sent today
 last_sent_date = None
 
+# Load followed series (saved across restarts)
+if os.path.exists("followed_series.json"):
+    with open("followed_series.json", "r") as f:
+        followed_series = json.load(f)
+else:
+    followed_series = []
+
+def save_followed_series():
+    with open("followed_series.json", "w") as f:
+        json.dump(followed_series, f, indent=2)
+
+# -------------------- EVENTS --------------------
+
 @bot.event
 async def on_ready():
-    # Called when the bot is ready and connected
-    print(f"We are ready to go in, {bot.user.name}")
-    daily_comic_check.start()  # Start the daily comic check loop
+    print(f"✅ Bot is online: {bot.user.name}")
+    daily_comic_check.start()
 
 @bot.event
 async def on_member_join(member):
-    # Send a welcome message to new members via DM
     await member.send(f"Welcome to the server {member.name}")
 
 @bot.event
 async def on_message(message):
-    # Ignore messages sent by the bot itself
     if message.author == bot.user:
         return 
-    # Delete messages containing a banned word and warn the user
     if "shit" in message.content.lower():
         await message.delete()
         await message.channel.send(f"{message.author.mention} - don't use that word!")
-    # Allow commands to be processed
     await bot.process_commands(message)
 
-@bot.command()
-async def comics(ctx):
-    # Respond to the !comics command by sending today's comics in the channel
-    channel = bot.get_channel(comics_channel_id)
-    if channel:
-        await fetch_and_send_comics(channel)
+# -------------------- COMMANDS --------------------
 
 @bot.command()
 async def hello(ctx):
-    # Respond to the !hello command
     await ctx.send(f"Hello {ctx.author.mention} !")
 
 @bot.command()
-async def choose(ctx):
-    def check_author(m): return m.author == ctx.author and m.channel == ctx.channel
+async def follow(ctx, *, series_name):
+    """Add a series to the followed list"""
+    if series_name not in followed_series:
+        followed_series.append(series_name)
+        save_followed_series()
+        await ctx.send(f"✅ You are now following **{series_name}**.")
+    else:
+        await ctx.send(f"ℹ️ You're already following **{series_name}**.")
 
-    await ctx.send("📝 Please enter a **publisher** (e.g. Marvel, DC Comics):")
-    publisher_msg = await bot.wait_for('message', check=check_author, timeout=30)
-    publisher_name = publisher_msg.content.strip().lower()
+@bot.command()
+async def comics(ctx):
+    """Show next issues for followed series"""
+    headers = {"User-Agent": "MyComicBot/1.0"}
+    upcoming = []
 
-    await ctx.send("🦸 Now enter a **character name** (e.g. Spider-Man, Batman):")
-    character_msg = await bot.wait_for('message', check=check_author, timeout=30)
-    character_name = character_msg.content.strip().lower()
+    for series in followed_series:
+        url = f"https://comicvine.gamespot.com/api/issues/?api_key={comicvine_api_key}&format=json&filter=name:{series}&sort=store_date:asc"
+        response = requests.get(url, headers=headers).json()
+        results = response.get("results", [])
 
-    await ctx.send("🔍 Searching for ongoing series matching your request...")
+        future_issues = [
+            i for i in results 
+            if i.get("store_date") and i["store_date"] >= datetime.today().strftime('%Y-%m-%d')
+            and i.get("volume", {}).get("name", "").lower() == series.lower()
+        ]
 
-    # Step 1: Search for character
-    character_search_url = f"https://comicvine.gamespot.com/api/characters/?api_key={comicvine_api_key}&format=json&filter=name:{character_name}"
-    headers = {"User-Agent": "MyComicBot"}
-    char_response = requests.get(character_search_url, headers=headers).json()
-    characters = char_response.get("results", [])
-    if not characters:
-        await ctx.send(f"❌ Character '{character_name}' not found.")
-        return
+        if future_issues:
+            issue = future_issues[0]
+            title = issue.get("name") or series
+            date = issue.get("store_date")
+            upcoming.append(f"• **{title}** → 📅 {date}")
 
-    character_id = characters[0]["id"]
+    if upcoming:
+        await ctx.send("📬 Upcoming issues:\n" + "\n".join(upcoming))
+    else:
+        await ctx.send("📭 No upcoming issues found.")
 
-    # Step 2: Search for volumes (series) with that character
-    # ⚠️ ComicVine doesn't support direct volume-by-character search, so we use `/volumes/` with name and filter manually
-    volumes_url = f"https://comicvine.gamespot.com/api/volumes/?api_key={comicvine_api_key}&format=json&filter=name:{character_name}&sort=name:asc"
-    volumes_response = requests.get(volumes_url, headers=headers).json()
-    volumes = volumes_response.get("results", [])
-
-    # Filter by publisher and end_year
-    matching = []
-    for vol in volumes:
-        if vol.get("publisher", {}).get("name", "").lower() != publisher_name:
-            continue
-        if vol.get("end_year") not in (None, 0):
-            continue  # Not ongoing
-        matching.append(vol)
-
-    if not matching:
-        await ctx.send(f"❌ No ongoing series found with character '{character_name}' from publisher '{publisher_name}'.")
-        return
-
-    # Show top 5 choices
-    message_lines = [f"**{i+1}.** {v['name']} (start: {v.get('start_year', 'N/A')})" for i, v in enumerate(matching[:5])]
-    await ctx.send("🎯 Please choose a series by typing the number:\n" + "\n".join(message_lines))
-
-    try:
-        response = await bot.wait_for('message', check=check_author, timeout=30)
-        choice = int(response.content.strip()) - 1
-        selected = matching[choice]
-    except (ValueError, IndexError):
-        await ctx.send("❌ Invalid selection.")
-        return
-
-    # Save user selection
-    user_selected_series[ctx.author.id] = selected
-    await ctx.send(f"✅ You selected: **{selected['name']}** (ID: {selected['id']})")
-
+# -------------------- DAILY CHECK --------------------
 
 @tasks.loop(minutes=1)
 async def daily_comic_check():
-    """
-    Checks every minute if it's 08:00 and comics haven't been sent today.
-    If so, sends today's comics to the specified channel.
-    """
     global last_sent_date
-
     now = datetime.now()
     current_time = now.strftime("%H:%M")
     today = now.date()
 
-    # If it's 08:00 and comics haven't been sent today, send them
     if current_time == "08:00" and last_sent_date != today:
-        channel = bot.get_channel(comics_channel_id)
-        if channel:
-            await fetch_and_send_comics(channel)
-            last_sent_date = today
+        headers = {"User-Agent": "MyComicBot/1.0"}
+        date_today = today.strftime('%Y-%m-%d')
+        url = f"https://comicvine.gamespot.com/api/issues/?api_key={comicvine_api_key}&format=json&filter=store_date:{date_today}"
+        response = requests.get(url, headers=headers).json()
+        issues = response.get("results", [])
 
-async def fetch_and_send_comics(channel):
-    """
-    Fetches today's comics from ComicVine API and sends them as embeds to the given channel.
-    """
-    date_today = datetime.today().strftime('%Y-%m-%d')
-    url = f"https://comicvine.gamespot.com/api/issues/?api_key={comicvine_api_key}&format=json&filter=store_date:{date_today}"
-    headers = {"User-Agent": "MyComicBot/1.0"}
-
-    try:
-        response = requests.get(url, headers=headers)
-        data = response.json()
-        results = data.get("results", [])
-
-        if not results:
-            await channel.send("📭 No comics released today.")
+        if not issues:
             return
 
-        for issue in results:
-            # Extract comic details
-            name = issue.get("name") or issue.get("volume", {}).get("name", "Unnamed")
-            link = issue.get("site_detail_url", "")
-            volume = issue.get("volume", {}).get("name", "Unknown Series")
-            image = issue.get("image", {}).get("original_url")
-            release_date = issue.get("store_date", date_today)
+        for issue in issues:
+            volume_name = issue.get("volume", {}).get("name", "").lower()
+            if any(s.lower() == volume_name for s in followed_series):
+                title = issue.get("name") or volume_name
+                link = issue.get("site_detail_url", "")
+                image = issue.get("image", {}).get("original_url")
 
-            # Create and send an embed for each comic
-            embed = discord.Embed(
-                title=name,
-                url=link,
-                description=f"📅 Release date: **{release_date}**\n📚 Series: *{volume}*",
-                color=0x00ffcc
-            )
-            if image:
-                embed.set_thumbnail(url=image)
-            embed.set_footer(text="Powered by ComicVine")
-            await channel.send(embed=embed)
+                embed = discord.Embed(
+                    title=title,
+                    url=link,
+                    description=f"📅 Released today!\n📚 Series: *{volume_name}*",
+                    color=0x00ffcc
+                )
+                if image:
+                    embed.set_thumbnail(url=image)
+                embed.set_footer(text="Powered by ComicVine")
 
-    except Exception as e:
-        # Send error message if fetching fails
-        await channel.send(f"⚠️ Error fetching comics: {e}")
+                channel = bot.get_channel(comics_channel_id)
+                await channel.send(embed=embed)
 
-# Run the bot with logging enabled
+        last_sent_date = today
+
+# -------------------- RUN --------------------
+
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
