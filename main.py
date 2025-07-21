@@ -7,6 +7,7 @@ import requests
 from datetime import datetime
 from webserver import keep_alive
 import json
+import asyncio
 
 # Load environment variables
 load_dotenv()
@@ -17,8 +18,14 @@ comics_channel_id = int(os.getenv('DISCORD_CHANNEL_ID'))
 # Keep-alive (for Render hosting)
 keep_alive()
 
-# Logging
-handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w')
+# Configure logging
+logger = logging.getLogger("discord")
+logger.setLevel(logging.INFO)
+
+# Log to file
+file_handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w')
+file_handler.setFormatter(logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s'))
+logger.addHandler(file_handler)
 
 # Intents
 intents = discord.Intents.default()
@@ -45,7 +52,7 @@ def save_followed_series():
 
 @bot.event
 async def on_ready():
-    print(f"✅ Bot is online: {bot.user.name}")
+    logger.info(f"Bot is ready as {bot.user}")
     daily_comic_check.start()
 
 @bot.event
@@ -69,34 +76,105 @@ async def hello(ctx):
 
 @bot.command()
 async def follow(ctx, *, series_name):
+    """Search ComicVine volumes by name and allow user to follow one with pagination."""
     user_id = str(ctx.author.id)
-    followed_series.setdefault(user_id, [])
-    if series_name not in followed_series[user_id]:
-        followed_series[user_id].append(series_name)
-        save_followed_series()
-        await ctx.send(f"✅ You are now following **{series_name}**.")
-    else:
-        await ctx.send(f"ℹ️ You are already following **{series_name}**.")
-        
+    headers = {"User-Agent": "MyComicBot/1.0"}
+
+    url = f"https://comicvine.gamespot.com/api/volumes/?api_key={comicvine_api_key}&format=json&filter=name:{series_name}&sort=start_year:desc"
+    response = requests.get(url, headers=headers).json()
+    volumes = response.get("results", [])
+
+    if not volumes:
+        await ctx.send(f"❌ No series found with the name '{series_name}'.")
+        return
+
+    per_page = 5
+    page = 0
+
+    def make_page_content(page_index):
+        start = page_index * per_page
+        end = start + per_page
+        page_volumes = volumes[start:end]
+        return "\n".join(
+            f"**{i+1}.** {v['name']} (ID: {v['id']}, start: {v.get('start_year', 'N/A')})"
+            for i, v in enumerate(page_volumes)
+        ), len(page_volumes)
+
+    while True:
+        content, count = make_page_content(page)
+        await ctx.send(f"📚 Page {page + 1} of {((len(volumes)-1)//per_page)+1}\n" +
+                       content + "\n\nReply with a number to follow, or `next`, `prev`, or `stop`.")
+
+        def check_author(m): return m.author == ctx.author and m.channel == ctx.channel
+        try:
+            msg = await bot.wait_for('message', timeout=60, check=check_author)
+            text = msg.content.strip().lower()
+
+            if text == "stop":
+                await ctx.send("❌ Selection canceled.")
+                return
+            elif text == "next":
+                if (page + 1) * per_page < len(volumes):
+                    page += 1
+                else:
+                    await ctx.send("🚫 You're on the last page.")
+            elif text == "prev":
+                if page > 0:
+                    page -= 1
+                else:
+                    await ctx.send("🚫 You're already on the first page.")
+            elif text.isdigit():
+                index = int(text) - 1
+                real_index = page * per_page + index
+                if 0 <= real_index < len(volumes):
+                    selected = volumes[real_index]
+                    # Save
+                    followed_series.setdefault(user_id, [])
+                    already = any(s["volume_id"] == selected["id"] for s in followed_series[user_id])
+                    if already:
+                        await ctx.send(f"ℹ️ You are already following **{selected['name']}**.")
+                    else:
+                        followed_series[user_id].append({
+                            "name": selected["name"],
+                            "volume_id": selected["id"]
+                        })
+                        save_followed_series()
+                        await ctx.send(f"✅ You are now following **{selected['name']}**.")
+                    return
+                else:
+                    await ctx.send("❌ Invalid number.")
+            else:
+                await ctx.send("❓ Invalid command. Use number, `next`, `prev`, or `stop`.")
+
+        except asyncio.TimeoutError:
+            await ctx.send("⌛ Timed out. Please start over with `!follow`.")
+            return
+
 @bot.command()
 async def unfollow(ctx, *, series_name):
     user_id = str(ctx.author.id)
-    if user_id in followed_series and series_name in followed_series[user_id]:
-        followed_series[user_id].remove(series_name)
+    user_list = followed_series.get(user_id, [])
+    new_list = [s for s in user_list if s["name"].lower() != series_name.lower()]
+
+    if len(new_list) == len(user_list):
+        await ctx.send(f"❌ You are not following **{series_name}**.")
+    else:
+        followed_series[user_id] = new_list
         save_followed_series()
         await ctx.send(f"🗑️ Unfollowed **{series_name}**.")
-    else:
-        await ctx.send(f"❌ Series **{series_name}** not in your followed list.")
 
 
 @bot.command()
 async def myseries(ctx):
     user_id = str(ctx.author.id)
-    user_list = followed_series.get(user_id, [])
-    if not user_list:
-        await ctx.send("📭 You are not following any series. Use `!follow <series name>` to add one.")
-    else:
-        await ctx.send("📚 You're currently following:\n" + "\n".join(f"• {s}" for s in user_list))
+    series = followed_series.get(user_id, [])
+    if not series:
+        await ctx.send("📭 You are not following any series.")
+        return
+
+    msg = "\n".join(f"• {s['name']} (ID: {s['volume_id']})" for s in series)
+    await ctx.send("📚 Your followed series:\n" + msg)
+
 
 
 @bot.command()
@@ -138,26 +216,50 @@ async def lastissues(ctx):
     headers = {"User-Agent": "MyComicBot/1.0"}
     messages = []
 
+    logger.info(f"🔍 Fetching last issues for user {ctx.author} ({user_id})")
+    logger.info(f"Followed series: {user_list}")
+
     for series in user_list:
+        logger.info(f"📚 Checking series: {series}")
         url = f"https://comicvine.gamespot.com/api/issues/?api_key={comicvine_api_key}&format=json&filter=name:{series}&sort=store_date:desc"
-        response = requests.get(url, headers=headers).json()
-        results = response.get("results", [])
+        logger.info(f"🔗 API URL: {url}")
 
-        past_issues = [
-            issue for issue in results
-            if issue.get("store_date") and issue["store_date"] <= datetime.today().strftime('%Y-%m-%d')
-            and issue.get("volume", {}).get("name", "").lower() == series.lower()
-        ]
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            results = data.get("results", [])
 
-        if past_issues:
-            issue = past_issues[0]
-            title = issue.get("name") or series
-            date = issue.get("store_date")
-            messages.append(f"📘 **{title}** → 🗓️ {date}")
-        else:
-            messages.append(f"❓ No past issues found for **{series}**.")
+            logger.info(f"✅ Found {len(results)} results for {series}")
+
+            for issue in results:
+                vol_name = issue.get("volume", {}).get("name", "N/A")
+                store_date = issue.get("store_date", "N/A")
+                logger.info(f"🔎 Issue found → Volume: {vol_name}, Store Date: {store_date}, Title: {issue.get('name')}")
+
+
+            past_issues = [
+                issue for issue in results
+                if issue.get("store_date") and issue["store_date"] <= datetime.today().strftime('%Y-%m-%d')
+                and issue.get("volume", {}).get("name", "").lower() == series.lower()
+            ]
+
+            logger.info(f"🕐 {len(past_issues)} past issues matched for {series}")
+
+            if past_issues:
+                issue = past_issues[0]
+                title = issue.get("name") or series
+                date = issue.get("store_date")
+                messages.append(f"📘 **{title}** → 🗓️ {date}")
+            else:
+                messages.append(f"❓ No past issues found for **{series}**.")
+
+        except Exception as e:
+            logger.error(f"❌ Error fetching issues for {series}: {e}")
+            messages.append(f"❌ Error fetching issues for **{series}**.")
 
     await ctx.send("🕐 Last released issues:\n" + "\n".join(messages))
+
 
 
 # -------------------- DAILY CHECK --------------------
@@ -203,4 +305,4 @@ async def daily_comic_check():
 
 # -------------------- RUN --------------------
 
-bot.run(token, log_handler=handler, log_level=logging.DEBUG)
+bot.run(token)
