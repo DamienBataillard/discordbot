@@ -35,7 +35,7 @@ if os.path.exists("followed_series.json"):
     with open("followed_series.json", "r") as f:
         followed_series = json.load(f)
 else:
-    followed_series = []
+    followed_series = {}
 
 def save_followed_series():
     with open("followed_series.json", "w") as f:
@@ -69,34 +69,35 @@ async def hello(ctx):
 
 @bot.command()
 async def follow(ctx, *, series_name):
-    """Add a series to the followed list"""
-    if series_name not in followed_series:
-        followed_series.append(series_name)
+    user_id = str(ctx.author.id)
+    followed_series.setdefault(user_id, [])
+    if series_name not in followed_series[user_id]:
+        followed_series[user_id].append(series_name)
         save_followed_series()
         await ctx.send(f"✅ You are now following **{series_name}**.")
     else:
-        await ctx.send(f"ℹ️ You're already following **{series_name}**.")
-
+        await ctx.send(f"ℹ️ You are already following **{series_name}**.")
+        
 @bot.command()
 async def unfollow(ctx, *, series_name):
-    """Remove a series from the followed list"""
-    lowered = series_name.lower()
-    matches = [s for s in followed_series if s.lower() == lowered]
-    if matches:
-        followed_series.remove(matches[0])
+    user_id = str(ctx.author.id)
+    if user_id in followed_series and series_name in followed_series[user_id]:
+        followed_series[user_id].remove(series_name)
         save_followed_series()
         await ctx.send(f"🗑️ Unfollowed **{series_name}**.")
     else:
-        await ctx.send(f"❌ Series **{series_name}** is not in your followed list.")
+        await ctx.send(f"❌ Series **{series_name}** not in your followed list.")
+
 
 @bot.command()
 async def myseries(ctx):
-    """List all followed series"""
-    if not followed_series:
+    user_id = str(ctx.author.id)
+    user_list = followed_series.get(user_id, [])
+    if not user_list:
         await ctx.send("📭 You are not following any series. Use `!follow <series name>` to add one.")
     else:
-        series_list = "\n".join(f"• {s}" for s in followed_series)
-        await ctx.send(f"📚 You're currently following:\n{series_list}")
+        await ctx.send("📚 You're currently following:\n" + "\n".join(f"• {s}" for s in user_list))
+
 
 @bot.command()
 async def comics(ctx):
@@ -125,6 +126,39 @@ async def comics(ctx):
         await ctx.send("📬 Upcoming issues:\n" + "\n".join(upcoming))
     else:
         await ctx.send("📭 No upcoming issues found.")
+
+@bot.command()
+async def lastissues(ctx):
+    user_id = str(ctx.author.id)
+    user_list = followed_series.get(user_id, [])
+    if not user_list:
+        await ctx.send("📭 You are not following any series. Use `!follow <series name>`.")
+        return
+
+    headers = {"User-Agent": "MyComicBot/1.0"}
+    messages = []
+
+    for series in user_list:
+        url = f"https://comicvine.gamespot.com/api/issues/?api_key={comicvine_api_key}&format=json&filter=name:{series}&sort=store_date:desc"
+        response = requests.get(url, headers=headers).json()
+        results = response.get("results", [])
+
+        past_issues = [
+            issue for issue in results
+            if issue.get("store_date") and issue["store_date"] <= datetime.today().strftime('%Y-%m-%d')
+            and issue.get("volume", {}).get("name", "").lower() == series.lower()
+        ]
+
+        if past_issues:
+            issue = past_issues[0]
+            title = issue.get("name") or series
+            date = issue.get("store_date")
+            messages.append(f"📘 **{title}** → 🗓️ {date}")
+        else:
+            messages.append(f"❓ No past issues found for **{series}**.")
+
+    await ctx.send("🕐 Last released issues:\n" + "\n".join(messages))
+
 
 # -------------------- DAILY CHECK --------------------
 
