@@ -11,6 +11,8 @@ load_dotenv()
 token = os.getenv('DISCORD_TOKEN')
 comicvine_api_key = os.getenv('COMICVINE_API_KEY')
 comics_channel_id = int(os.getenv('DISCORD_CHANNEL_ID'))
+user_selected_series = {}  # user_id -> volume dict
+
 
 # Set up logging to a file
 handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w')
@@ -60,6 +62,67 @@ async def comics(ctx):
 async def hello(ctx):
     # Respond to the !hello command
     await ctx.send(f"Hello {ctx.author.mention} !")
+
+@bot.command()
+async def choose(ctx):
+    def check_author(m): return m.author == ctx.author and m.channel == ctx.channel
+
+    await ctx.send("📝 Please enter a **publisher** (e.g. Marvel, DC Comics):")
+    publisher_msg = await bot.wait_for('message', check=check_author, timeout=30)
+    publisher_name = publisher_msg.content.strip().lower()
+
+    await ctx.send("🦸 Now enter a **character name** (e.g. Spider-Man, Batman):")
+    character_msg = await bot.wait_for('message', check=check_author, timeout=30)
+    character_name = character_msg.content.strip().lower()
+
+    await ctx.send("🔍 Searching for ongoing series matching your request...")
+
+    # Step 1: Search for character
+    character_search_url = f"https://comicvine.gamespot.com/api/characters/?api_key={comicvine_api_key}&format=json&filter=name:{character_name}"
+    headers = {"User-Agent": "MyComicBot"}
+    char_response = requests.get(character_search_url, headers=headers).json()
+    characters = char_response.get("results", [])
+    if not characters:
+        await ctx.send(f"❌ Character '{character_name}' not found.")
+        return
+
+    character_id = characters[0]["id"]
+
+    # Step 2: Search for volumes (series) with that character
+    # ⚠️ ComicVine doesn't support direct volume-by-character search, so we use `/volumes/` with name and filter manually
+    volumes_url = f"https://comicvine.gamespot.com/api/volumes/?api_key={comicvine_api_key}&format=json&filter=name:{character_name}&sort=name:asc"
+    volumes_response = requests.get(volumes_url, headers=headers).json()
+    volumes = volumes_response.get("results", [])
+
+    # Filter by publisher and end_year
+    matching = []
+    for vol in volumes:
+        if vol.get("publisher", {}).get("name", "").lower() != publisher_name:
+            continue
+        if vol.get("end_year") not in (None, 0):
+            continue  # Not ongoing
+        matching.append(vol)
+
+    if not matching:
+        await ctx.send(f"❌ No ongoing series found with character '{character_name}' from publisher '{publisher_name}'.")
+        return
+
+    # Show top 5 choices
+    message_lines = [f"**{i+1}.** {v['name']} (start: {v.get('start_year', 'N/A')})" for i, v in enumerate(matching[:5])]
+    await ctx.send("🎯 Please choose a series by typing the number:\n" + "\n".join(message_lines))
+
+    try:
+        response = await bot.wait_for('message', check=check_author, timeout=30)
+        choice = int(response.content.strip()) - 1
+        selected = matching[choice]
+    except (ValueError, IndexError):
+        await ctx.send("❌ Invalid selection.")
+        return
+
+    # Save user selection
+    user_selected_series[ctx.author.id] = selected
+    await ctx.send(f"✅ You selected: **{selected['name']}** (ID: {selected['id']})")
+
 
 @tasks.loop(minutes=1)
 async def daily_comic_check():
