@@ -90,6 +90,15 @@ async def unfollow(ctx, *, series_name):
         await ctx.send(f"❌ Series **{series_name}** is not in your followed list.")
 
 @bot.command()
+async def myseries(ctx):
+    """List all followed series"""
+    if not followed_series:
+        await ctx.send("📭 You are not following any series. Use `!follow <series name>` to add one.")
+    else:
+        series_list = "\n".join(f"• {s}" for s in followed_series)
+        await ctx.send(f"📚 You're currently following:\n{series_list}")
+
+@bot.command()
 async def comics(ctx):
     """Show next issues for followed series"""
     headers = {"User-Agent": "MyComicBot/1.0"}
